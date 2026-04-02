@@ -1,10 +1,14 @@
 import { Stack } from "expo-router";
 import { useEffect, useState } from "react";
 import { View, Text, ActivityIndicator, DeviceEventEmitter, StyleSheet } from "react-native";
+import * as SplashScreen from 'expo-splash-screen';
 
 import { setupSSLPinning } from "../src/security/sslPinning";
 import { runAntiTamperChecks } from "../src/security/antiTamper";
 import { initializeSecurity } from "../src/network/secureAxios";
+
+// Prevent auto hide so we can handle it manually after security checks
+SplashScreen.preventAutoHideAsync().catch(() => {});
 
 export default function RootLayout() {
   const [isSecure, setIsSecure] = useState(false);
@@ -16,14 +20,15 @@ export default function RootLayout() {
 
     const bootstrapSecurity = async () => {
       try {
-        // 1. Initial Anti-Tamper check
-        runAntiTamperChecks();
-        
-        // 2. Setup SSL Pinning to prevent MITM (Mocked gracefully for setup if package not installed yet)
-        await setupSSLPinning().catch(() => console.log('SSL pinning mocked for demonstration'));
-        
-        // 3. Initialize cryptographic network keys securely from C++ via JNI
-        await initializeSecurity();
+        // Run all critical initialization steps wrapped in a timeout
+        await Promise.race([
+          (async () => {
+            runAntiTamperChecks();
+            await setupSSLPinning().catch(() => console.log('SSL pinning mocked for demonstration'));
+            await initializeSecurity();
+          })(),
+          new Promise((_, reject) => setTimeout(() => reject(new Error('FATAL: Security bootstrap timed out! A Native Module Promise is hanging indefinitely.')), 5000))
+        ]);
         
         if (isMounted) {
             setIsSecure(true);
@@ -33,6 +38,9 @@ export default function RootLayout() {
          if (isMounted) {
             setBootError(error?.message || "Critical Security Initialization Failure.\nBridge disconnected or Native Module missing.");
          }
+      } finally {
+         // MUST hide the native splash screen overlay to actually see the app/errors!
+         SplashScreen.hideAsync().catch(() => {});
       }
     };
 

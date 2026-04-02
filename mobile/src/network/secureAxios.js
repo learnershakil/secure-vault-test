@@ -1,13 +1,14 @@
 import axios from 'axios';
-import { NativeModules, Platform } from 'react-native';
+import { Platform } from 'react-native';
 
 let CryptoJS = null;
 let AsyncStorage = null;
 
 // Polyfill globalThis.crypto for React Native (crypto-js requires it)
 if (typeof globalThis.crypto === 'undefined' || !globalThis.crypto.getRandomValues) {
+    const existingCrypto = globalThis.crypto || {};
     globalThis.crypto = {
-        ...globalThis.crypto,
+        ...existingCrypto,
         getRandomValues: (array) => {
             for (let i = 0; i < array.length; i++) {
                 array[i] = Math.floor(Math.random() * 256);
@@ -25,12 +26,24 @@ try {
 
 try {
     AsyncStorage = require('@react-native-async-storage/async-storage');
-    if (AsyncStorage.default) AsyncStorage = AsyncStorage.default;
+    if (AsyncStorage && AsyncStorage.default) AsyncStorage = AsyncStorage.default;
 } catch (e) {
     console.warn('[SecureAxios] AsyncStorage not available.');
 }
 
-const { SecretsModule } = NativeModules;
+// Access SecretsModule via NativeModules (interop layer bridges old modules in New Architecture)
+let SecretsModule = null;
+try {
+    const { NativeModules } = require('react-native');
+    SecretsModule = NativeModules.SecretsModule || null;
+    if (SecretsModule) {
+        console.log('[SecureAxios] SecretsModule loaded via NativeModules');
+    } else {
+        console.warn('[SecureAxios] SecretsModule is null in NativeModules');
+    }
+} catch (e) {
+    console.warn('[SecureAxios] Failed to access NativeModules:', e.message);
+}
 
 // Local in-memory store for tokens (also backed by AsyncStorage)
 let accessToken = null;
@@ -49,34 +62,44 @@ const processQueue = (error, token = null) => {
   failedQueue = [];
 };
 
+// Helper to prevent infinite bridge hangs under New Architecture interop layer
+const withTimeout = (promise, ms, name) => {
+    return Promise.race([
+        promise,
+        new Promise((_, reject) => setTimeout(() => reject(new Error(`Native module bridge timeout: ${name}`)), ms))
+    ]);
+};
+
 // --- Initialization ---
 export const initializeSecurity = async () => {
     // Attempt to read secrets from native C++ JNI bridge
     if (SecretsModule && typeof SecretsModule.getSecret === 'function') {
         try {
-            hmacSecretCache = await SecretsModule.getSecret();
+            console.log('[SecureAxios] Calling SecretsModule.getSecret()...');
+            hmacSecretCache = await withTimeout(SecretsModule.getSecret(), 2000, 'getSecret');
+            console.log('[SecureAxios] SecretsModule.getSecret() succeeded!');
         } catch (e) {
-            console.warn('[SecureAxios] SecretsModule.getSecret() failed:', e.message);
+            console.warn('[SecureAxios] SecretsModule.getSecret() failed or timed out:', e.message);
         }
     }
     
     // Fallback HMAC secret for development when native module isn't linked
     if (!hmacSecretCache) {
-        console.warn('[SecureAxios] Using fallback HMAC secret (dev only). Native C++ bridge not available.');
+        console.warn('[SecureAxios] Using fallback HMAC secret (dev only). Native C++ bridge not available or timed out.');
         hmacSecretCache = 's3cr3t_v4u1t_hm4c_k3y_2026!@#$';
     }
 
     apiBaseUrlCache = Platform.select({
-        android: __DEV__ ? 'http://10.249.118.166:3000' : 'https://api.lpulive.in',
+        android: __DEV__ ? 'http://10.249.118.166' : 'https://api.lpulive.in',
         ios: 'http://localhost:3000',
     });
     
     // Use Native Module URL if in production/Release and available
     if (!__DEV__ && SecretsModule && typeof SecretsModule.getBaseUrl === 'function') {
         try {
-            apiBaseUrlCache = await SecretsModule.getBaseUrl();
+            apiBaseUrlCache = await withTimeout(SecretsModule.getBaseUrl(), 2000, 'getBaseUrl');
         } catch (e) {
-            console.warn('[SecureAxios] SecretsModule.getBaseUrl() failed:', e.message);
+            console.warn('[SecureAxios] SecretsModule.getBaseUrl() failed or timed out:', e.message);
         }
     }
     
